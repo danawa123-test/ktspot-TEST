@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+            <style></style>
+        </head>
+        <body>
+            
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TEST</title>
+    <script type="text/javascript" src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=77d80685ba81e39ad75a9fbe0298d0d3&amp;libraries=services"></script>
+    <style>
+        body, html { height: 100%; margin: 0; padding: 0; font-family: Arial, sans-serif; }
+        .container { display: flex; height: 100%; }
+        #map { flex: 1; }
+        .sidebar { width: 300px; padding: 20px; background-color: rgba(255, 255, 255, 0.8); overflow-y: auto; display: flex; flex-direction: column; }
+        h1 { margin-top: 0; }
+        .input-group { margin-bottom: 10px; }
+        .input-group input { width: 100%; padding: 5px; }
+        #result { margin-top: 20px; }
+        #debug-container { margin-top: 20px; }
+        #debug { font-family: monospace; font-size: 12px; background-color: #f0f0f0; padding: 10px; max-height: 200px; overflow-y: auto; display: none; }
+        .search-results { margin-top: 10px; }
+        .search-result { cursor: pointer; padding: 5px; border: 1px solid #ddd; margin-bottom: 5px; }
+        .search-result:hover { background-color: #f0f0f0; }
+        #toggle-debug { margin-top: auto; }
+    </style>
+
+
+    <div class="container">
+        <div class="sidebar">
+            <h1>TEST</h1>
+            
+            <div class="input-group">
+                <label for="start">출발지:</label>
+                <input type="text" id="start" placeholder="출발지 입력 (예: 서울역)">
+                <div id="start-results" class="search-results"></div>
+            </div>
+
+            <div class="input-group">
+                <label for="waypoint">경유지:</label>
+                <input type="text" id="waypoint" placeholder="경유지 입력 (선택사항)">
+                <div id="waypoint-results" class="search-results"></div>
+            </div>
+
+            <div class="input-group">
+                <label for="end">도착지:</label>
+                <input type="text" id="end" placeholder="도착지 입력 (예: 강남역)">
+                <div id="end-results" class="search-results"></div>
+            </div>
+
+            <button onclick="calculateRoute()">경로 계산</button>
+
+            <div id="result"></div>
+            <div id="debug-container">
+                <button id="toggle-debug" onclick="toggleDebug()">디버그 정보 표시/숨기기</button>
+                <div id="debug">지도 초기화 시작<br></div>
+            </div>
+        </div>
+        <div id="map"></div>
+    </div>
+
+    <script>
+        let map;
+        let markers = [];
+        let polyline;
+        const JAVASCRIPT_KEY = '77d80685ba81e39ad75a9fbe0298d0d3';
+        const REST_API_KEY = '3022fd9ad2e6226945d352c13139eb75';
+
+        function debugLog(message) {
+            console.log(message);
+            const debugElement = document.getElementById('debug');
+            debugElement.innerHTML += message + '<br>';
+            debugElement.scrollTop = debugElement.scrollHeight;
+        }
+
+        function toggleDebug() {
+            const debugElement = document.getElementById('debug');
+            debugElement.style.display = debugElement.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function initMap() {
+            debugLog("지도 초기화 시작");
+            const container = document.getElementById('map');
+            const options = {
+                center: new kakao.maps.LatLng(37.566826, 126.9786567),
+                level: 3
+            };
+            map = new kakao.maps.Map(container, options);
+            debugLog("지도 초기화 완료");
+
+            ['start', 'waypoint', 'end'].forEach(id => {
+                document.getElementById(id).addEventListener('input', function() {
+                    searchPlaces(this.value, id);
+                });
+            });
+        }
+
+        function searchPlaces(keyword, inputId) {
+            if (!keyword.trim()) {
+                document.getElementById(`${inputId}-results`).innerHTML = '';
+                return;
+            }
+
+            const ps = new kakao.maps.services.Places();
+            ps.keywordSearch(keyword, (data, status) => {
+                if (status === kakao.maps.services.Status.OK) {
+                    showSearchResults(data, inputId);
+                }
+            });
+        }
+
+        function showSearchResults(results, inputId) {
+            const resultsContainer = document.getElementById(`${inputId}-results`);
+            resultsContainer.innerHTML = '';
+            results.forEach((place, index) => {
+                if (index < 5) {
+                    const div = document.createElement('div');
+                    div.className = 'search-result';
+                    div.textContent = place.place_name;
+                    div.onclick = function() {
+                        document.getElementById(inputId).value = place.place_name;
+                        resultsContainer.innerHTML = '';
+                        addMarker(new kakao.maps.LatLng(place.y, place.x), inputId);
+                    };
+                    resultsContainer.appendChild(div);
+                }
+            });
+        }
+
+        function calculateRoute() {
+            debugLog("경로 계산 시작");
+            clearPreviousResults();
+
+            const start = document.getElementById('start').value;
+            const waypoint = document.getElementById('waypoint').value;
+            const end = document.getElementById('end').value;
+
+            if (!start || !end) {
+                alert('출발지와 도착지를 모두 입력해주세요.');
+                return;
+            }
+
+            const ps = new kakao.maps.services.Places();
+
+            Promise.all([
+                searchPlace(ps, start, '출발지'),
+                searchPlace(ps, end, '도착지'),
+                waypoint ? searchPlace(ps, waypoint, '경유지') : Promise.resolve(null)
+            ]).then(([startCoord, endCoord, waypointCoord]) => {
+                if (waypointCoord) {
+                    findRouteWithWaypoint(startCoord, waypointCoord, endCoord);
+                } else {
+                    findRoute(startCoord, endCoord);
+                }
+            }).catch(error => {
+                debugLog("경로 계산 오류: " + error);
+                alert(error);
+            });
+        }
+
+        function searchPlace(ps, keyword, label) {
+            return new Promise((resolve, reject) => {
+                ps.keywordSearch(keyword, (data, status) => {
+                    debugLog(`${label} 검색 결과: ${JSON.stringify(data)}`);
+                    if (status === kakao.maps.services.Status.OK) {
+                        const place = data[0];
+                        const coord = new kakao.maps.LatLng(place.y, place.x);
+                        addMarker(coord, label);
+                        resolve(coord);
+                    } else {
+                        reject(`${label}를 찾을 수 없습니다. 다른 키워드로 시도해보세요.`);
+                    }
+                });
+            });
+        }
+
+        function addMarker(position, label) {
+            const markerContent = `<div style="color: #000; font-size: 12px;">${label}</div>`;
+            const customOverlay = new kakao.maps.CustomOverlay({
+                position: position,
+                content: markerContent
+            });
+            customOverlay.setMap(map);
+            markers.push(customOverlay);
+        }
+
+        function findRoute(start, end) {
+            debugLog("경로 찾기 시작");
+            const url = `https://apis-navi.kakaomobility.com/v1/directions?origin=${start.getLng()},${start.getLat()}&destination=${end.getLng()},${end.getLat()}&waypoints=&priority=RECOMMEND&car_fuel=GASOLINE&car_hipass=false&alternatives=false&road_details=false`;
+
+            fetch(url, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `KakaoAK ${REST_API_KEY}`,
+                    'Content-Type': 'application/json'
+                }
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                debugLog("경로 데이터 수신: " + JSON.stringify(data));
+                if (data.routes && data.routes.length > 0) {
+                    const path = decodePath(data.routes[0].sections[0].roads);
+                    drawRoute(path);
+                    showRouteInfo(data.routes[0]);
+                } else {
+                    throw new Error('경로 데이터가 없습니다.');
+                }
+            })
+            .catch(error => {
+                debugLog("경로 찾기 오류: " + error);
+                alert('경로를 가져오는 데 실패했습니다. 디버그 정보를 확인해주세요.');
+            });
+        }
+
+        function findRouteWithWaypoint(start, waypoint, end) {
+            debugLog("경유지 포함 경로 찾기 시작");
+            const url = `https://apis-navi.kakaomobility.com/v1/directions?origin=${start.getLng()},${start.getLat()}&destination=${end.getLng()},${end.getLat()}&waypoints=${waypoint.getLng()},${waypoint.getLat()}&priority=RECOMMEND&car_fuel=GASOLINE&car_hipass=false&alternatives=false&road_details=false`;
+
+            fetch(url, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `KakaoAK ${REST_API_KEY}`,
+                    'Content-Type': 'application/json'
+                }
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                debugLog("경유지 포함 경로 데이터 수신: " + JSON.stringify(data));
+                if (data.routes && data.routes.length > 0) {
+                    const path = data.routes[0].sections.flatMap(section => decodePath(section.roads));
+                    drawRoute(path);
+                    showRouteInfo(data.routes[0]);
+                } else {
+                    throw new Error('경로 데이터가 없습니다.');
+                }
+            })
+            .catch(error => {
+                debugLog("경유지 포함 경로 찾기 오류: " + error);
+                alert('경로를 가져오는 데 실패했습니다. 디버그 정보를 확인해주세요.');
+            });
+        }
+
+        function decodePath(roads) {
+            return roads.flatMap(road => 
+                road.vertexes.reduce((acc, coord, index) => {
+                    if (index % 2 === 0) {
+                        acc.push(new kakao.maps.LatLng(road.vertexes[index + 1], coord));
+                    }
+                    return acc;
+                }, [])
+            );
+        }
+
+        function drawRoute(path) {
+            debugLog("경로 그리기 시작");
+            if (polyline) {
+                polyline.setMap(null);
+            }
+
+            polyline = new kakao.maps.Polyline({
+                path: path,
+                strokeWeight: 5,
+                strokeColor: '#FF0000',
+                strokeOpacity: 0.7,
+                strokeStyle: 'solid'
+            });
+
+            polyline.setMap(map);
+
+            const bounds = new kakao.maps.LatLngBounds();
+            path.forEach(position => bounds.extend(position));
+            map.setBounds(bounds);
+        }
+
+        function showRouteInfo(route) {
+            debugLog("경로 정보 표시");
+            const totalDistance = route.summary.distance / 1000;
+            const totalDuration = Math.round(route.summary.duration / 60);
+            document.getElementById('result').innerHTML = `총 거리: ${totalDistance.toFixed(1)}km, 예상 소요 시간: 약 ${totalDuration}분`;
+        }
+
+        function clearPreviousResults() {
+            markers.forEach(marker => marker.setMap(null));
+            markers = [];
+            if (polyline) {
+                polyline.setMap(null);
+            }
+            document.getElementById('result').innerHTML = '';
+            document.getElementById('debug').innerHTML = '';
+            ['start', 'waypoint', 'end'].forEach(id => {
+                document.getElementById(`${id}-results`).innerHTML = '';
+            });
+        }
+
+        window.onload = initMap;
+    </script>
+
+
+            <script></script>
+        
+    
+</body>
